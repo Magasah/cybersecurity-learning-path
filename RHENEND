@@ -1,0 +1,251 @@
+import socket
+import subprocess
+import threading
+import requests
+import time
+import ipaddress
+import sys
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from colorama import init, Fore, Style
+import platform
+
+# Initialize colorama for cross-platform colored output
+init(autoreset=True)
+
+# ASCII Art Banner
+BANNER = f"""
+{Fore.GREEN}
+╔══════════════════════════════════════════════════════════════╗
+║  ██████╗██╗  ██╗██████╗ ███╗   ██╗███████╗███╗   ██╗ ██████╗  ║
+║  ██╔══██╗██║  ██║██╔══██╗████╗  ██║██╔════╝████╗  ██║██╔═══██╗ ║
+║  ██████╔╝███████║██████╔╝██╔██╗ ██║█████╗  ██╔██╗ ██║██║   ██║ ║
+║  ██╔══██╗██╔══██║██╔══██╗██║╚██╗██║██╔══╝  ██║╚██╗██║██║   ██║ ║
+║  ██║  ██║██║  ██║██████╔╝██║ ╚████║███████╗██║ ╚████║╚██████╔╝ ║
+║  ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═══╝ ╚═════╝  ║{Style.RESET_ALL}
+╚══════════════════════════════════════════════════════════════╝
+
+{Fore.GREEN}Professional Network Admin & Pentest Tool v2.0{Style.RESET_ALL}
+"""
+
+# Top 100 common ports for fast scanning (well-known services)
+COMMON_PORTS = [21,22,23,25,53,80,110,111,135,139,143,443,993,995,1723,3306,3389,5900,8080]
+
+def print_banner():
+    """Display the cool ASCII banner"""
+    print(BANNER)
+
+def get_local_ip():
+    """Get local IP address using socket connection to external host"""
+    try:
+        # Connect to Google DNS to determine local interface
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        return "Unknown"
+
+def get_public_ip():
+    """Get public IP using ipify API"""
+    try:
+        response = requests.get("https://api.ipify.org", timeout=5)
+        return response.text.strip()
+    except requests.RequestException:
+        return "Unable to fetch (No internet?)"
+
+def get_mac_address(ip):
+    """Get MAC address using ARP table lookup"""
+    try:
+        if platform.system().lower() == "windows":
+            result = subprocess.run(["arp", "-a", ip], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.splitlines():
+                if ip in line:
+                    mac = line.split()[1] if len(line.split()) > 1 else "N/A"
+                    return mac.replace("-", ":")
+        else:  # Linux/macOS
+            result = subprocess.run(["arp", "-n", ip], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.splitlines():
+                if ip in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        return parts[2]
+        return "N/A"
+    except Exception:
+        return "N/A"
+
+def get_gateway():
+    """Get default gateway IP"""
+    try:
+        result = subprocess.run(["ip", "route", "show", "default"], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "default via" in line:
+                    return line.split()[2]
+        # Windows fallback
+        result = subprocess.run(["route", "print"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.splitlines():
+            if "0.0.0.0" in line and "0.0.0.0" in line:
+                parts = line.split()
+                if len(parts) >= 3:
+                    return parts[2]
+        return "N/A"
+    except Exception:
+        return "N/A"
+
+def system_info():
+    """Display comprehensive system information"""
+    print(f"\n{Fore.GREEN}[+] SYSTEM INFORMATION{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Local IP:{Style.RESET_ALL} {get_local_ip()}")
+    print(f"{Fore.CYAN}Public IP:{Style.RESET_ALL} {get_public_ip()}")
+    print(f"{Fore.CYAN}Gateway:  {Style.RESET_ALL} {get_gateway()}")
+    print(f"{Fore.CYAN}MAC Addr: {Style.RESET_ALL} {get_mac_address(get_local_ip())}")
+    print(f"{Fore.CYAN}OS:       {Style.RESET_ALL} {platform.system()} {platform.release()}")
+
+def ping_sweep(subnet):
+    """Ping sweep entire subnet to find live hosts"""
+    print(f"\n{Fore.GREEN}[+] PING SWEEP: {subnet}{Style.RESET_ALL}")
+    try:
+        network = ipaddress.ip_network(subnet, strict=False)
+        live_hosts = []
+        
+        def ping_host(ip):
+            """Ping single host with timeout"""
+            try:
+                # Cross-platform ping command
+                param = "-n" if platform.system().lower() == "windows" else "-c"
+                result = subprocess.run(["ping", param, "1", "-W", "1", str(ip)], 
+                                      capture_output=True, timeout=3)
+                if result.returncode == 0:
+                    live_hosts.append(str(ip))
+                    print(f"{Fore.GREEN}✓{Style.RESET_ALL} {str(ip)}")
+                else:
+                    print(f"{Fore.RED}✗{Style.RESET_ALL} {str(ip)}")
+            except:
+                pass
+        
+        # Thread pool for fast parallel pinging
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            futures = [executor.submit(ping_host, ip) for ip in network.hosts()]
+            for future in as_completed(futures):
+                future.result()
+        
+        print(f"\n{Fore.GREEN}LIVE HOSTS ({len(live_hosts)}):{Style.RESET_ALL}")
+        for host in live_hosts:
+            mac = get_mac_address(host)
+            print(f"  {Fore.CYAN}{host}{Style.RESET_ALL} (MAC: {mac})")
+            
+    except ValueError as e:
+        print(f"{Fore.RED}[-] Invalid subnet format: {e}{Style.RESET_ALL}")
+
+def scan_port(target, port):
+    """Scan single port with socket connection attempt"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        result = sock.connect_ex((target, port))
+        sock.close()
+        return port, result == 0
+    except:
+        return port, False
+
+def port_scanner():
+    """Fast multi-threaded port scanner for top 100 ports"""
+    target = input(f"\n{Fore.CYAN}[?] Enter target IP: {Style.RESET_ALL}").strip()
+    
+    if not target:
+        print(f"{Fore.RED}[-] Invalid target{Style.RESET_ALL}")
+        return
+    
+    print(f"\n{Fore.GREEN}[+] FAST PORT SCAN: {target} (Top {len(COMMON_PORTS)} ports){Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}Port  Service{Style.RESET_ALL}")
+    print("-" * 30)
+    
+    open_ports = []
+    
+    # Multi-threaded port scanning with ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=100) as executor:
+        futures = {executor.submit(scan_port, target, port): port for port in COMMON_PORTS}
+        
+        for future in as_completed(futures):
+            port, is_open = future.result()
+            service = "open" if is_open else "closed"
+            color = Fore.GREEN if is_open else Fore.RED
+            print(f"{color:>4d}   {service}{Style.RESET_ALL}")
+            
+            if is_open:
+                open_ports.append(port)
+    
+    print("-" * 30)
+    print(f"{Fore.GREEN}OPEN PORTS ({len(open_ports)}): {sorted(open_ports)}{Style.RESET_ALL}")
+
+def internet_health_check():
+    """Ping Google DNS for internet connectivity test"""
+    target = "8.8.8.8"
+    print(f"\n{Fore.GREEN}[+] INTERNET HEALTH CHECK: {target} (Google DNS){Style.RESET_ALL}")
+    
+    param = "-n" if platform.system().lower() == "windows" else "-c"
+    cmd = ["ping", param, "10", "-W", "1", target]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        print(result.stdout)
+        
+        # Parse results for stats
+        lines = result.stdout.splitlines()
+        for line in lines:
+            if "packet loss" in line.lower() or "Verlorene" in line or "perdidos" in line:
+                print(f"{Fore.GREEN}{line.strip()}{Style.RESET_ALL}")
+                break
+                
+    except subprocess.TimeoutExpired:
+        print(f"{Fore.RED}[-] Ping timeout - Check your connection{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.RED}[-] Error: {e}{Style.RESET_ALL}")
+
+def main():
+    """Main interactive menu loop"""
+    print_banner()
+    
+    while True:
+        try:
+            print(f"\n{Fore.GREEN}MAIN MENU{Style.RESET_ALL}")
+            print("1. My System Info")
+            print("2. Network Ping Sweep")
+            print("3. Fast Port Scanner")
+            print("4. Internet Health Check")
+            print("0. Exit")
+            
+            choice = input(f"\n{Fore.CYAN}Select option (0-4): {Style.RESET_ALL}").strip()
+            
+            if choice == "1":
+                system_info()
+            elif choice == "2":
+                subnet = input(f"{Fore.CYAN}Enter subnet (e.g. 192.168.1.0/24): {Style.RESET_ALL}").strip()
+                if subnet:
+                    ping_sweep(subnet)
+                else:
+                    print(f"{Fore.RED}[-] No subnet provided{Style.RESET_ALL}")
+            elif choice == "3":
+                port_scanner()
+            elif choice == "4":
+                internet_health_check()
+            elif choice == "0":
+                print(f"{Fore.GREEN}Goodbye! Stay secure.{Style.RESET_ALL}")
+                sys.exit(0)
+            else:
+                print(f"{Fore.RED}[-] Invalid option. Choose 0-4{Style.RESET_ALL}")
+                
+            input(f"\n{Fore.YELLOW}Press Enter to continue...{Style.RESET_ALL}")
+            
+        except KeyboardInterrupt:
+            print(f"\n{Fore.RED}[-] Interrupted by user. Exiting...{Style.RESET_ALL}")
+            sys.exit(0)
+        except Exception as e:
+            print(f"{Fore.RED}[-] Unexpected error: {e}{Style.RESET_ALL}")
+            input(f"\n{Fore.YELLOW}Press Enter to continue...{Style.RESET_ALL}")
+
+if __name__ == "__main__":
+    main()
